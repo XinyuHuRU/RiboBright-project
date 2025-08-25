@@ -1,0 +1,133 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+from skimage import io, measure
+from skimage.color import label2rgb
+import matplotlib.pyplot as plt
+
+# Paths
+ribobright_images_path = "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_009/48h_RA/Raw image/RiboBright"
+opp_images_path = "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_009/48h_RA/Raw image/OPP"
+cell_mask_path = "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_009/48h_RA/Raw image/OPP_output"
+
+
+# Parameters
+min_cell_area = 1800  # Minimum cell size to consider
+data_records = []  # To store the results
+
+# Function to parse filenames
+def parse_filename(filename):
+    """
+    Parse filenames to extract relevant information such as time_point, treatment, and replicate.
+    Handles both 0h (no treatment) and treatment-based images.
+    """
+    pattern_with_treatment = r"(?P<time_point>\d+h)_(?P<treatment>[\w]+)_(?P<replicate>\d+)_OPP.tif"
+    pattern_no_treatment = r"(?P<time_point>\d+h)_(?P<replicate>\d+)_OPP.tif"
+
+    match_with_treatment = re.match(pattern_with_treatment, filename)
+    match_no_treatment = re.match(pattern_no_treatment, filename)
+
+    if match_with_treatment:
+        return match_with_treatment.group("treatment"), match_with_treatment.group("time_point"), match_with_treatment.group("replicate")
+    elif match_no_treatment:
+        return None, match_no_treatment.group("time_point"), match_no_treatment.group("replicate")
+    return None, None, None
+
+# Function to load images and masks
+def load_images_and_masks():
+    images_data = []
+    for filename in os.listdir(opp_images_path):
+        if filename.endswith("_OPP.tif"):
+            treatment, time_point, replicate = parse_filename(filename)
+            if time_point and replicate:  # Ensure time_point and replicate are present
+                ribobright_filename = f"{time_point}_{treatment or ''}_{replicate}_RiboBright.tif".replace("__", "_")
+                mask_filename = f"{time_point}_{treatment or ''}_{replicate}_OPP_mask.tif".replace("__", "_")
+                
+                ribobright_path = os.path.join(ribobright_images_path, ribobright_filename)
+                opp_path = os.path.join(opp_images_path, filename)
+                mask_path = os.path.join(cell_mask_path, mask_filename)
+                
+                if os.path.exists(ribobright_path) and os.path.exists(opp_path) and os.path.exists(mask_path):
+                    images_data.append({
+                        "treatment": treatment or "No_Treatment",
+                        "time_point": time_point,
+                        "replicate": replicate,
+                        "ribobright_image": io.imread(ribobright_path),
+                        "opp_image": io.imread(opp_path),
+                        "cell_mask": io.imread(mask_path),
+                    })
+    return images_data
+
+# Function to extract intensity
+def extract_intensity(image, mask):
+    labeled_cells = measure.label(mask)
+    properties = measure.regionprops(labeled_cells, intensity_image=image)
+    intensity_data = {}
+    for prop in properties:
+        if prop.area >= min_cell_area:
+            intensity_data[prop.label] = prop.mean_intensity
+    return intensity_data
+
+# Function to display filtered cells
+def display_filtered_cells(raw_image, mask, title):
+    labeled_cells = measure.label(mask)
+    properties = measure.regionprops(labeled_cells)
+    filtered_mask = np.zeros_like(mask)
+
+    for prop in properties:
+        if prop.area >= min_cell_area:
+            filtered_mask[labeled_cells == prop.label] = prop.label
+
+    # Overlay visualization
+    overlay = label2rgb(filtered_mask, image=raw_image, bg_label=0, kind='overlay')
+    plt.figure(figsize=(10, 10))
+    plt.title(f"{title} - Filtered Cells")
+    plt.imshow(overlay)
+    plt.axis("off")
+    plt.show()
+
+# Function to analyze images
+def analyze_images(images_data):
+    global data_records
+    for data in images_data:
+        treatment = data["treatment"]
+        replicate = data["replicate"]
+
+        # Extract intensities using the OPP mask
+        opp_intensity = extract_intensity(data["opp_image"], data["cell_mask"])
+        ribobright_intensity = extract_intensity(data["ribobright_image"], data["cell_mask"])
+
+        # Display filtered cells
+        display_filtered_cells(data["opp_image"], data["cell_mask"], f"{treatment} Replicate {replicate}")
+
+        # Collect data
+        for cell_label, opp_value in opp_intensity.items():
+            ribobright_value = ribobright_intensity.get(cell_label, np.nan)  # Use NaN if missing
+            cell_id = f"{treatment}_{replicate}_{cell_label}"
+            data_records.append({
+                "Cell_ID": cell_id,
+                "Treatment": treatment,
+                "Time_Point": data["time_point"],
+                "Replicate": replicate,
+                "OPP Intensity": opp_value,
+                "RiboBright Intensity": ribobright_value
+            })
+
+# Function to save data to CSV
+def save_to_csv(output_path):
+    df = pd.DataFrame(data_records)
+    df.to_csv(output_path, index=False)
+    print(f"Data saved to {output_path}")
+
+# Main script
+if __name__ == "__main__":
+    # Load images and masks
+    images_data = load_images_and_masks()
+    
+    # Analyze images
+    analyze_images(images_data)
+    
+    # Save to CSV
+    output_csv_path = "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_009/48h_RA_data.csv"
+    save_to_csv(output_csv_path)
