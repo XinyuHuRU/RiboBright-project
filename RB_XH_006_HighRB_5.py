@@ -165,3 +165,13 @@ for bar in bars:
 plt.tight_layout()
 plt.savefig(os.path.join(output_dir, "HighRB_PerPopulation_BarPlot.svg"))
 plt.show()
+
+# --- Plot distribution of all RB pixels ---
+plt.figure(figsize=(10, 5))
+sns.kdeplot(all_rb_pixel_values, fill=True)
+plt.title("RB Pixel Intensity Distribution (All RB pixels)")
+plt.xlabel("RB Intensity")
+plt.ylabel("Density")
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "RB_Intensity_AllPixels_KDE.svg"))
+plt.show()
