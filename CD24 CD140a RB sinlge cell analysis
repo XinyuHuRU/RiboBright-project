@@ -1,0 +1,228 @@
+import os
+import numpy as np
+import pandas as pd
+import skimage.io as io
+import skimage.util as util
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from scipy.stats import mannwhitneyu
+from skimage.measure import label, regionprops
+from skimage.color import label2rgb
+
+# ----------------------------
+# Path configurations
+# ----------------------------
+base_dir = "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_006/image"
+crop_dir = os.path.join(base_dir, "Cropped")
+filtered_dir = os.path.join(base_dir, "Filtered_Images")
+os.makedirs(crop_dir, exist_ok=True)
+os.makedirs(filtered_dir, exist_ok=True)
+
+folders = {
+    "CD24": os.path.join(base_dir, "CD24"),
+    "CD140a": os.path.join(base_dir, "CD140a"),
+    "RB": os.path.join(base_dir, "RB"),
+    "CD24_output": os.path.join(base_dir, "CD24_output"),
+    "CD140a_output": os.path.join(base_dir, "CD140a_output"),
+    "RB_output": os.path.join(base_dir, "RB_output"),
+}
+
+# ----------------------------
+# Crop settings
+# ----------------------------
+crop_x, crop_y = 0, 196
+crop_width, crop_height = 2048, 1436
+
+# ----------------------------
+# Global result storage
+# ----------------------------
+results = []
+
+# ----------------------------
+# Helper functions
+# ----------------------------
+def crop_and_save(input_path, output_path):
+    image = io.imread(input_path)
+    cropped_image = image[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width]
+    io.imsave(output_path, util.img_as_uint(cropped_image))
+    return cropped_image
+
+def display_filtered_image(image, mask, title, save_path):
+    if mask is not None and mask.size > 0:
+        labeled_mask = label(mask)
+        overlay = label2rgb(labeled_mask, image=image, bg_label=0)
+        plt.figure(figsize=(8, 6))
+        plt.imshow(overlay)
+        plt.title(title)
+        plt.axis("off")
+        plt.show()
+        io.imsave(save_path, util.img_as_uint(overlay))
+
+def process_image(image_name, min_area=8000, min_roundness=0.25, max_roundness=0.75, edge_margin=10):
+    rb_image = crop_and_save(os.path.join(folders["RB"], f"{image_name}_RB.tif"),
+                             os.path.join(crop_dir, f"{image_name}_RB_cropped.tif"))
+    cd24_image = crop_and_save(os.path.join(folders["CD24"], f"{image_name}_CD24.tif"),
+                               os.path.join(crop_dir, f"{image_name}_CD24_cropped.tif"))
+    cd140a_image = crop_and_save(os.path.join(folders["CD140a"], f"{image_name}_CD140a.tif"),
+                                 os.path.join(crop_dir, f"{image_name}_CD140a_cropped.tif"))
+
+    rb_mask = crop_and_save(os.path.join(folders["RB_output"], f"{image_name}_RB_mask.tif"),
+                            os.path.join(crop_dir, f"{image_name}_RB_mask_cropped.tif"))
+    cd24_mask_path = os.path.join(folders["CD24_output"], f"{image_name}_CD24_mask.tif")
+    cd24_mask = crop_and_save(cd24_mask_path, os.path.join(crop_dir, f"{image_name}_CD24_mask_cropped.tif")) if os.path.exists(cd24_mask_path) else None
+    cd140a_mask_path = os.path.join(folders["CD140a_output"], f"{image_name}_CD140a_mask.tif")
+    cd140a_mask = crop_and_save(cd140a_mask_path, os.path.join(crop_dir, f"{image_name}_CD140a_mask_cropped.tif")) if os.path.exists(cd140a_mask_path) else None
+
+    rb_label = label(rb_mask)
+    cd24_label = label(cd24_mask) if cd24_mask is not None else None
+    cd140a_label = label(cd140a_mask) if cd140a_mask is not None else None
+
+    cd24_plus_filtered_mask = np.zeros_like(rb_mask, dtype=bool)
+    cd140a_plus_filtered_mask = np.zeros_like(rb_mask, dtype=bool)
+    double_neg_filtered_mask = np.zeros_like(rb_mask, dtype=bool)
+    double_pos_filtered_mask = np.zeros_like(rb_mask, dtype=bool)
+
+    CD24_INTENSITY_THRESHOLD = 200
+    CD140A_INTENSITY_THRESHOLD = 150
+    OVERLAP_THRESHOLD = 0.9
+
+    for region in regionprops(rb_label):
+        cell_area = region.area
+        perimeter = region.perimeter
+        roundness = (4.0 * np.pi * cell_area) / (perimeter ** 2) if perimeter > 0 else 0
+
+        if cell_area < min_area or not (min_roundness <= roundness <= max_roundness):
+            continue
+
+        coords = region.coords
+        if (
+            np.any(coords[:, 0] < edge_margin) or
+            np.any(coords[:, 0] >= rb_image.shape[0] - edge_margin) or
+            np.any(coords[:, 1] < edge_margin) or
+            np.any(coords[:, 1] >= rb_image.shape[1] - edge_margin)
+        ):
+            continue
+
+        cd24_intensity = float(np.mean(cd24_image[coords[:, 0], coords[:, 1]])) if cd24_image is not None else None
+        cd140a_intensity = float(np.mean(cd140a_image[coords[:, 0], coords[:, 1]])) if cd140a_image is not None else None
+
+        cd24_overlap = np.mean(cd24_label[coords[:, 0], coords[:, 1]] > 0) if cd24_label is not None else 0
+        cd140a_overlap = np.mean(cd140a_label[coords[:, 0], coords[:, 1]] > 0) if cd140a_label is not None else 0
+
+        is_cd24 = cd24_intensity is not None and cd24_intensity >= CD24_INTENSITY_THRESHOLD and cd24_overlap >= OVERLAP_THRESHOLD
+        is_cd140a = cd140a_intensity is not None and cd140a_intensity >= CD140A_INTENSITY_THRESHOLD and cd140a_overlap >= OVERLAP_THRESHOLD
+
+        if is_cd24 and is_cd140a:
+            cell_type = "CD24+CD140a+"
+        elif is_cd24:
+            cell_type = "CD24+"
+        elif is_cd140a:
+            cell_type = "CD140a+"
+        else:
+            cell_type = "CD24-CD140a-"
+
+        results.append({
+            "Image": image_name,
+            "Cell Type": cell_type,
+            "RB Gray Value": float(np.mean(rb_image[coords[:, 0], coords[:, 1]])),
+            "CD24 Gray Value": cd24_intensity,
+            "CD140a Gray Value": cd140a_intensity,
+            "Area": cell_area,
+            "Roundness": roundness
+        })
+
+        if cell_type == "CD24+":
+            cd24_plus_filtered_mask[coords[:, 0], coords[:, 1]] = True
+        elif cell_type == "CD140a+":
+            cd140a_plus_filtered_mask[coords[:, 0], coords[:, 1]] = True
+        elif cell_type == "CD24+CD140a+":
+            double_pos_filtered_mask[coords[:, 0], coords[:, 1]] = True
+        else:
+            double_neg_filtered_mask[coords[:, 0], coords[:, 1]] = True
+
+    display_filtered_image(rb_image, cd24_plus_filtered_mask, f"Filtered CD24+ Cells: {image_name}", os.path.join(filtered_dir, f"{image_name}_CD24plus_filtered.tif"))
+    display_filtered_image(rb_image, cd140a_plus_filtered_mask, f"Filtered CD140a+ Cells: {image_name}", os.path.join(filtered_dir, f"{image_name}_CD140aplus_filtered.tif"))
+    display_filtered_image(rb_image, double_neg_filtered_mask, f"Filtered CD24-CD140a- Cells: {image_name}", os.path.join(filtered_dir, f"{image_name}_DoubleNeg_filtered.tif"))
+    display_filtered_image(rb_image, double_pos_filtered_mask, f"Filtered CD24+CD140a+ Cells: {image_name}", os.path.join(filtered_dir, f"{image_name}_DoublePos_filtered.tif"))
+
+# ---------------- Process all images ----------------
+for file in os.listdir(folders["RB"]):
+    if file.endswith("_RB.tif"):
+        process_image(file.replace("_RB.tif", ""))
+
+# ---------------- Convert to DataFrame and Save ----------------
+df = pd.DataFrame(results)
+df.to_csv(os.path.join(base_dir, "Individual_cell_RB_gray_values.csv"), index=False)
+
+# ---------------- Histogram of CD24 and CD140a Gray Values ----------------
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+sns.histplot(df["CD24 Gray Value"].dropna(), bins=100, kde=True, color="blue")
+plt.axvline(200, color='red', linestyle='--', label='Threshold = 200')
+plt.title("CD24 Mean Intensity per Cell")
+plt.xlabel("CD24 Gray Value")
+plt.ylabel("Count")
+plt.legend()
+
+plt.subplot(1, 2, 2)
+sns.histplot(df["CD140a Gray Value"].dropna(), bins=100, kde=True, color="green")
+plt.axvline(150, color='red', linestyle='--', label='Threshold = 150')
+plt.title("CD140a Mean Intensity per Cell")
+plt.xlabel("CD140a Gray Value")
+plt.ylabel("Count")
+plt.legend()
+
+plt.tight_layout()
+plt.savefig(os.path.join(base_dir, "CD24_CD140a_Intensity_Histograms.svg"))
+plt.show()
+
+# ---------------- Violin Plot with Stats ----------------
+category_order = ["CD24-CD140a-", "CD24+", "CD140a+", "CD24+CD140a+"]
+cell_counts = df["Cell Type"].value_counts().to_dict()
+
+plt.figure(figsize=(10, 6))
+ax = sns.violinplot(x="Cell Type", y="RB Gray Value", data=df,
+                    palette="muted", order=category_order, inner="box")
+
+sns.pointplot(x="Cell Type", y="RB Gray Value", data=df,
+              estimator=np.median, color="black", markers="D", linestyles="", order=category_order, ax=ax)
+
+# Add median labels
+y_max = df["RB Gray Value"].max()
+medians = df.groupby("Cell Type")["RB Gray Value"].median()
+for i, cell_type in enumerate(category_order):
+    median_val = medians.get(cell_type, None)
+    if median_val is not None:
+        ax.text(i, median_val + y_max * 0.02, f"{median_val:.1f}",
+                ha='center', va='bottom', color='black', fontsize=9, fontweight='bold')
+
+# Significance testing
+from scipy.stats import mannwhitneyu
+
+def add_pvalue_annotation(x1, x2, y, pval, ax, offset=0.02):
+    line_height = y + offset
+    ax.plot([x1, x1, x2, x2], [y, line_height, line_height, y], lw=1.5, c='k')
+    ax.text((x1 + x2) / 2, line_height + offset, f"p = {pval:.2e}", ha='center', va='bottom', fontsize=10)
+
+comparisons = [
+    ("CD24-CD140a-", "CD24+"),
+    ("CD24-CD140a-", "CD140a+"),
+    ("CD24-CD140a-", "CD24+CD140a+")
+]
+
+for i, (g1, g2) in enumerate(comparisons):
+    x1 = category_order.index(g1)
+    x2 = category_order.index(g2)
+    vals1 = df[df["Cell Type"] == g1]["RB Gray Value"]
+    vals2 = df[df["Cell Type"] == g2]["RB Gray Value"]
+    stat, pval = mannwhitneyu(vals1, vals2, alternative='two-sided')
+    add_pvalue_annotation(x1, x2, y_max * (1.05 + i * 0.1), pval, ax)
+
+plot_title = "RB Intensity Distribution Across Cell Types\n" + \
+             ", ".join([f"{cat}: {cell_counts.get(cat, 0)}" for cat in category_order])
+plt.title(plot_title)
+plt.tight_layout()
+plt.savefig(os.path.join(base_dir, "RB_Intensity_Distribution_with_pvalues_and_medians.svg"))
+plt.show()
