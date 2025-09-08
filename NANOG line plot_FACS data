@@ -8,131 +8,141 @@ Created on Wed Jul 16 13:27:15 2025
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
+import glob
+import re
 from scipy.stats import ttest_ind
-
-# === Configuration ===
-file_paths = ['/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Subpopulation.csv', '/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_018/Subpopulation_018.csv']  # Change these to your actual file names
-time_order = ['0h', '24h', '48h', '72h']
-populations = ['CD140a-CD24+', 'CD140a+CD24+', 'CD140a+CD24-']
+import numpy as np
+import joypy
 
 
-# === Load and process data ===
-dfs = []
-for file in file_paths:
-    df = pd.read_csv(file)
-    df['Time'] = df.iloc[:, 0].str.extract(r'(\d+h)')
-    df['Replicate'] = df.iloc[:, 0].str.extract(r'Rep(\d+)').astype(int)
-    df['Experiment'] = file
-    dfs.append(df)
 
-data = pd.concat(dfs, ignore_index=True)
+# Load and aggregate data
+folder_paths = ['/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_018/Data exported', '/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Data exported']
 
-# === Reshape ===
-melted = data.melt(
-    id_vars=['Time', 'Replicate', 'Experiment'],
-    value_vars=populations,
-    var_name='Population', value_name='Percentage'
-)
+filename_pattern = r'export_(\d+)h_.*_Rep(\d+)_.*\.csv'
+all_data = []
 
-# === Compute baseline (0h mean per experiment/population) ===
-baseline = (
-    melted[melted['Time'] == '0h']
-    .groupby(['Experiment', 'Population'])['Percentage']
-    .mean()
-    .reset_index()
-    .rename(columns={'Percentage': 'Baseline'})
-)
+for folder in folder_paths:
+    files = glob.glob(os.path.join(folder, '*.csv'))
+    for file in files:
+        fname = os.path.basename(file)
+        match = re.match(filename_pattern, fname)
+        if match:
+            time = int(match.group(1))
+            df = pd.read_csv(file)
+            if 'GFP-A' not in df.columns:
+                continue
+            df = df[['GFP-A']].copy()
+            df['Time'] = time
+            all_data.append(df)
 
-# === Merge and compute delta ===
-merged = melted.merge(baseline, on=['Experiment', 'Population'])
-merged['Delta'] = merged['Percentage'] - merged['Baseline']
+data = pd.concat(all_data, ignore_index=True)
 
-# === Combine across experiments: summary stats ===
-combined_summary = (
-    merged.groupby(['Time', 'Population'])
-    .agg(Delta_Mean=('Delta', 'mean'), Delta_SD=('Delta', 'std'))
-    .reset_index()
-)
-combined_summary['Time'] = pd.Categorical(combined_summary['Time'], categories=time_order, ordered=True)
-combined_summary.sort_values(by='Time', inplace=True)
+# Normalize combined data to combined 0h mean
+baseline_mean = data[data['Time'] == 0]['GFP-A'].mean()
+data['GFP-A_normalized'] = data['GFP-A'] / baseline_mean
 
-# === Compute p-values: combine replicates from both experiments ===
-pvals = []
-for pop in populations:
-    group = merged[merged['Population'] == pop]
-    baseline_vals = group[group['Time'] == '0h']['Delta']
-    for time in ['24h', '48h', '72h']:
-        test_vals = group[group['Time'] == time]['Delta']
-        if not test_vals.empty:
-            t_stat, p = ttest_ind(test_vals, baseline_vals, equal_var=False)
-            pvals.append({'Population': pop, 'Time': time, 'p-value': p})
+# Sort time for consistent plotting
+data['Time'] = data['Time'].astype(int)
+data['Time_str'] = data['Time'].astype(str) + 'h'
 
-pval_df = pd.DataFrame(pvals)
-combined_summary = combined_summary.merge(pval_df, on=['Population', 'Time'], how='left')
+# === Ridgeline plot (optional, from before) ===
+wide_df = data.pivot(columns='Time_str', values='GFP-A_normalized').dropna(axis=1, how='all')
 
-# === Plot ===
-sns.set(style='white')
-palette = sns.color_palette("tab10", len(populations))
-
-plt.figure(figsize=(12, 6))
-
-# Plot individual data points
-for i, pop in enumerate(populations):
-    pop_data = merged[merged['Population'] == pop]
-    pop_data['Time_Index'] = pop_data['Time'].apply(lambda t: time_order.index(t))
-
-    # Scatter raw data points per population
-    sns.stripplot(
-        data=pop_data,
-        x='Time_Index', y='Delta',
-        color=palette[i], alpha=0.6, size=6,
-        jitter=0.2, edgecolor='black', linewidth=0.3,
-        label=None
-    )
-
-# Plot mean ± SD lines
-for i, pop in enumerate(populations):
-    df_plot = combined_summary[combined_summary['Population'] == pop]
-    x = [time_order.index(t) for t in df_plot['Time']]
-    y = df_plot['Delta_Mean']
-    yerr = df_plot['Delta_SD']
-
-    plt.plot(x, y, label=pop, color=palette[i], linewidth=2)
-    plt.fill_between(x, y - yerr, y + yerr, color=palette[i], alpha=0.2)
-
-    # Annotate significance stars
-    def p_to_stars(p):
-        if p < 0.001:
-            return '***'
-        elif p < 0.01:
-            return '**'
-        elif p < 0.05:
-            return '*'
-        else:
-            return ''
-
-    for idx, row in df_plot.iterrows():
-        p = row.get('p-value')
-        if pd.notna(p):
-            stars = p_to_stars(p)
-            if stars:
-                time_idx = time_order.index(row['Time'])
-                plt.text(time_idx, row['Delta_Mean'] + row['Delta_SD'] + 1,
-                         stars, ha='center', fontsize=10, color=palette[i])
-
-# Print exact p-values
-print("\nExact p-values vs 0h:")
-print(pval_df.pivot(index='Population', columns='Time', values='p-value').round(4))
-
-# Final plot settings
-plt.axhline(0, color='gray', linestyle='--', linewidth=0.5)
-plt.xticks(ticks=range(len(time_order)), labels=time_order)
-plt.xlabel('Time Point')
-plt.ylabel('Delta (%) from 0h')
-plt.title('Combined Δ Changes in Cell Populations Over Time\n(Shaded = ±SD, Points = Replicates, * = p < 0.05 vs. 0h)')
-plt.legend(title='Population', bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.figure(figsize=(10, 6))
+joypy.joyplot(wide_df, kind='kde', overlap=1, linewidth=1.5,
+              colormap=plt.cm.viridis, fade=True, alpha=0.7, linecolor='black')
+plt.title('Ridgeline Plot of Normalized GFP-A Distributions Over Time')
+plt.xlabel('Normalized GFP-A')
+plt.ylabel('Time Point')
+plt.grid(False)
 plt.tight_layout()
-plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Subpopulation.svg")
+plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Data exported/Ridgline plot_018 and 021.svg")
+plt.show()
+
+# === Calculate mean and SD per time ===
+summary = data.groupby('Time')['GFP-A_normalized'].agg(['mean', 'std', 'count']).reset_index()
+
+# === T-test of each time point vs 0h ===
+pvals = []
+baseline_data = data[data['Time'] == 0]['GFP-A_normalized']
+
+for t in summary['Time']:
+    if t == 0:
+        pvals.append(np.nan)
+        continue
+    test_data = data[data['Time'] == t]['GFP-A_normalized']
+    stat, p = ttest_ind(baseline_data, test_data, equal_var=False)
+    pvals.append(p)
+
+summary['p_value'] = pvals
+
+# Optional: add significance stars
+
+def format_pval(p):
+    if p < 0.001:
+        return "p < 0.001"
+    else:
+        return f"p = {p:.3f}"
+   
+
+#summary['significance'] = summary['p_value'].apply(sig_stars)
+
+# === Simplified line plot reflecting ridgeline plot (Mean NANOG over time) ===
+plt.figure(figsize=(8, 5))
+sns.set(style='white')
+
+# Use Time_str for x-axis labels
+summary['Time_str'] = summary['Time'].astype(str) + 'h'
+
+# Plot mean normalized GFP-A
+# plt.plot(summary['Time_str'], summary['mean'], marker='o', color='tab:blue', label='Mean normalized NANOG')
+
+# # Add shaded area for ±1 standard deviation
+# plt.fill_between(summary['Time_str'],
+#                  summary['mean'] - summary['std'],
+#                  summary['mean'] + summary['std'],
+#                  color='tab:blue', alpha=0.3)
+
+# plt.title('Mean Normalized NANOG (GFP-A) Over Time')
+# plt.xlabel('Time')
+# plt.ylabel('Normalized NANOG (to 0h)')
+# plt.ylim(bottom=0.5)
+# plt.grid(True)
+# plt.tight_layout()
+# plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Data exported/Mean_NANOG_lineplot.svg")
+# plt.show()
+
+
+# === Plot line plot with shaded SD and exact p-values ===
+plt.figure(figsize=(8, 5))
+sns.set(style='white')
+
+plt.plot(summary['Time'], summary['mean'], marker='o', color='tab:blue', label='Mean normalized GFP-A')
+plt.fill_between(summary['Time'], summary['mean'] - summary['std'], summary['mean'] + summary['std'],
+                 color='tab:blue', alpha=0.3)
+
+# Add exact p-value text above each time point (skip 0h)
+y_offset = summary['std'].max() * 1.5  # dynamic spacing
+for idx, row in summary.iterrows():
+    if row['Time'] == 0 or pd.isna(row['p_value']):
+        continue
+    plt.text(row['Time'], row['mean'] + y_offset,
+             f"p = {row['p_value']:.2e}",  # scientific notation for clarity
+             ha='center', fontsize=9, color='black')
+
+print("\nSummary table with p-values:")
+print(summary[['Time', 'mean', 'std', 'count', 'p_value']])
+
+plt.title('Mean Normalized GFP-A Over Time with Exact p-values')
+plt.xlabel('Time (hours)')
+plt.ylabel('Normalized GFP-A (to 0h)')
+plt.ylim(bottom=0.5)
+plt.grid(False)
+plt.legend()
+plt.tight_layout()
+plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Data exported/line plot_018 and 021_with_pvalues.svg")
 plt.show()
 
 
