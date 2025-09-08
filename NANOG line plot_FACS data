@@ -97,22 +97,22 @@ sns.set(style='white')
 summary['Time_str'] = summary['Time'].astype(str) + 'h'
 
 # Plot mean normalized GFP-A
-# plt.plot(summary['Time_str'], summary['mean'], marker='o', color='tab:blue', label='Mean normalized NANOG')
+plt.plot(summary['Time_str'], summary['mean'], marker='o', color='tab:blue', label='Mean normalized NANOG')
 
-# # Add shaded area for ±1 standard deviation
-# plt.fill_between(summary['Time_str'],
-#                  summary['mean'] - summary['std'],
-#                  summary['mean'] + summary['std'],
-#                  color='tab:blue', alpha=0.3)
+# Add shaded area for ±1 standard deviation
+plt.fill_between(summary['Time_str'],
+                  summary['mean'] - summary['std'],
+                  summary['mean'] + summary['std'],
+                  color='tab:blue', alpha=0.3)
 
-# plt.title('Mean Normalized NANOG (GFP-A) Over Time')
-# plt.xlabel('Time')
-# plt.ylabel('Normalized NANOG (to 0h)')
-# plt.ylim(bottom=0.5)
-# plt.grid(True)
-# plt.tight_layout()
-# plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Data exported/Mean_NANOG_lineplot.svg")
-# plt.show()
+plt.title('Mean Normalized NANOG (GFP-A) Over Time')
+plt.xlabel('Time')
+plt.ylabel('Normalized NANOG (to 0h)')
+plt.ylim(bottom=0.5)
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Data exported/Mean_NANOG_lineplot.svg")
+plt.show()
 
 
 # === Plot line plot with shaded SD and exact p-values ===
