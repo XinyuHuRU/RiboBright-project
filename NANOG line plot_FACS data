@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jul 16 13:27:15 2025
+
+@author: xinyuhu
+"""
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import ttest_ind
+
+# === Configuration ===
+file_paths = ['/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Subpopulation.csv', '/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_018/Subpopulation_018.csv']  # Change these to your actual file names
+time_order = ['0h', '24h', '48h', '72h']
+populations = ['CD140a-CD24+', 'CD140a+CD24+', 'CD140a+CD24-']
+
+
+# === Load and process data ===
+dfs = []
+for file in file_paths:
+    df = pd.read_csv(file)
+    df['Time'] = df.iloc[:, 0].str.extract(r'(\d+h)')
+    df['Replicate'] = df.iloc[:, 0].str.extract(r'Rep(\d+)').astype(int)
+    df['Experiment'] = file
+    dfs.append(df)
+
+data = pd.concat(dfs, ignore_index=True)
+
+# === Reshape ===
+melted = data.melt(
+    id_vars=['Time', 'Replicate', 'Experiment'],
+    value_vars=populations,
+    var_name='Population', value_name='Percentage'
+)
+
+# === Compute baseline (0h mean per experiment/population) ===
+baseline = (
+    melted[melted['Time'] == '0h']
+    .groupby(['Experiment', 'Population'])['Percentage']
+    .mean()
+    .reset_index()
+    .rename(columns={'Percentage': 'Baseline'})
+)
+
+# === Merge and compute delta ===
+merged = melted.merge(baseline, on=['Experiment', 'Population'])
+merged['Delta'] = merged['Percentage'] - merged['Baseline']
+
+# === Combine across experiments: summary stats ===
+combined_summary = (
+    merged.groupby(['Time', 'Population'])
+    .agg(Delta_Mean=('Delta', 'mean'), Delta_SD=('Delta', 'std'))
+    .reset_index()
+)
+combined_summary['Time'] = pd.Categorical(combined_summary['Time'], categories=time_order, ordered=True)
+combined_summary.sort_values(by='Time', inplace=True)
+
+# === Compute p-values: combine replicates from both experiments ===
+pvals = []
+for pop in populations:
+    group = merged[merged['Population'] == pop]
+    baseline_vals = group[group['Time'] == '0h']['Delta']
+    for time in ['24h', '48h', '72h']:
+        test_vals = group[group['Time'] == time]['Delta']
+        if not test_vals.empty:
+            t_stat, p = ttest_ind(test_vals, baseline_vals, equal_var=False)
+            pvals.append({'Population': pop, 'Time': time, 'p-value': p})
+
+pval_df = pd.DataFrame(pvals)
+combined_summary = combined_summary.merge(pval_df, on=['Population', 'Time'], how='left')
+
+# === Plot ===
+sns.set(style='white')
+palette = sns.color_palette("tab10", len(populations))
+
+plt.figure(figsize=(12, 6))
+
+# Plot individual data points
+for i, pop in enumerate(populations):
+    pop_data = merged[merged['Population'] == pop]
+    pop_data['Time_Index'] = pop_data['Time'].apply(lambda t: time_order.index(t))
+
+    # Scatter raw data points per population
+    sns.stripplot(
+        data=pop_data,
+        x='Time_Index', y='Delta',
+        color=palette[i], alpha=0.6, size=6,
+        jitter=0.2, edgecolor='black', linewidth=0.3,
+        label=None
+    )
+
+# Plot mean ± SD lines
+for i, pop in enumerate(populations):
+    df_plot = combined_summary[combined_summary['Population'] == pop]
+    x = [time_order.index(t) for t in df_plot['Time']]
+    y = df_plot['Delta_Mean']
+    yerr = df_plot['Delta_SD']
+
+    plt.plot(x, y, label=pop, color=palette[i], linewidth=2)
+    plt.fill_between(x, y - yerr, y + yerr, color=palette[i], alpha=0.2)
+
+    # Annotate significance stars
+    def p_to_stars(p):
+        if p < 0.001:
+            return '***'
+        elif p < 0.01:
+            return '**'
+        elif p < 0.05:
+            return '*'
+        else:
+            return ''
+
+    for idx, row in df_plot.iterrows():
+        p = row.get('p-value')
+        if pd.notna(p):
+            stars = p_to_stars(p)
+            if stars:
+                time_idx = time_order.index(row['Time'])
+                plt.text(time_idx, row['Delta_Mean'] + row['Delta_SD'] + 1,
+                         stars, ha='center', fontsize=10, color=palette[i])
+
+# Print exact p-values
+print("\nExact p-values vs 0h:")
+print(pval_df.pivot(index='Population', columns='Time', values='p-value').round(4))
+
+# Final plot settings
+plt.axhline(0, color='gray', linestyle='--', linewidth=0.5)
+plt.xticks(ticks=range(len(time_order)), labels=time_order)
+plt.xlabel('Time Point')
+plt.ylabel('Delta (%) from 0h')
+plt.title('Combined Δ Changes in Cell Populations Over Time\n(Shaded = ±SD, Points = Replicates, * = p < 0.05 vs. 0h)')
+plt.legend(title='Population', bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Subpopulation.svg")
+plt.show()
+
+
