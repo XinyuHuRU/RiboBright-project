@@ -145,4 +145,166 @@ plt.tight_layout()
 plt.savefig("/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/ManD results/XH_021/Data exported/line plot_018 and 021_with_pvalues.svg")
 plt.show()
 
+import os
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from pathlib import Path
+from scipy.stats import ttest_rel
+import numpy as np
+
+# Parameters
+EXPERIMENTS = [
+    "/Volumes/VERBATIM SD/RB-XH010/Exported data/Exp1",
+    "/Volumes/VERBATIM SD/RB-XH010/Exported data/Exp2"
+]
+POPULATIONS_TO_COMPARE = [("Q4", "Q1"), ("Q4", "Q2"), ("Q4", "Q3")]
+OUTPUT_DIR = "/Volumes/VERBATIM SD/RB-XH010/Exported data/plots"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Color palette: Q4 always gray
+PALETTE = {
+    "Q1": "#1f77b4",
+    "Q2": "#ff7f0e",
+    "Q3": "#2ca02c",
+    "Q4": "#a9a9a9"
+}
+
+# Set normalization method and optional x-axis limits
+method = "zscore"  # or "minmax"
+X_AXIS_LIMITS = (-6, 5)
+
+def parse_file_metadata(filename, experiment_folder):
+    parts = filename.split("_")
+    if len(parts) < 6:
+        raise ValueError(f"Filename format incorrect: {filename}")
+    bio_rep = f"BioRep{parts[2]}"
+    tech_rep = parts[3]
+    pop_part = next((p for p in parts if p.startswith("Q")), None)
+    if pop_part is None:
+        raise ValueError(f"Population not found in filename: {filename}")
+    pop = pop_part.split()[0]
+    exp_id = Path(experiment_folder).name
+    return exp_id, bio_rep, tech_rep, pop
+
+def collect_data():
+    all_data = []
+    for exp in EXPERIMENTS:
+        for file in os.listdir(exp):
+            if not file.lower().endswith(".csv") or file.startswith("._"):
+                continue
+            filepath = os.path.join(exp, file)
+            try:
+                try:
+                    df = pd.read_csv(filepath)
+                except UnicodeDecodeError:
+                    df = pd.read_csv(filepath, encoding="ISO-8859-1")
+                exp_id, bio_rep, tech_rep, pop = parse_file_metadata(file, exp)
+                df['Experiment'] = exp_id
+                df['BiologicalReplicate'] = bio_rep
+                df['TechnicalReplicate'] = tech_rep
+                df['Population'] = pop
+                all_data.append(
+                    df[['BV421-A', 'Experiment', 'BiologicalReplicate', 'TechnicalReplicate', 'Population']]
+                )
+            except Exception as e:
+                print(f"Skipping file {file} due to error: {e}")
+    if not all_data:
+        raise ValueError("No valid data files found. Please check your input folders and file format.")
+    full_data = pd.concat(all_data, ignore_index=True)
+
+    def normalize(group):
+        if method == "zscore":
+            mean = group["BV421-A"].mean()
+            std = group["BV421-A"].std()
+            group["BV421-A-Norm"] = (group["BV421-A"] - mean) / std
+        elif method == "minmax":
+            min_val = group["BV421-A"].min()
+            max_val = group["BV421-A"].max()
+            group["BV421-A-Norm"] = (group["BV421-A"] - min_val) / (max_val - min_val)
+        return group
+
+    normalized_data = full_data.groupby(
+        ["Experiment", "BiologicalReplicate", "TechnicalReplicate"]
+    ).apply(normalize).reset_index(drop=True)
+    return normalized_data
+
+def plot_aggregated_kde_and_bar(data, pop1, pop2):
+    subset = data[data['Population'].isin([pop1, pop2])]
+
+    # Aggregated KDE
+    plt.figure(figsize=(8, 5))
+    sns.kdeplot(
+        data=subset,
+        x="BV421-A-Norm",
+        hue="Population",
+        common_norm=False,
+        fill=True,
+        palette={pop1: PALETTE[pop1], pop2: PALETTE[pop2]},
+        alpha=0.5
+    )
+    if X_AXIS_LIMITS:
+        plt.xlim(X_AXIS_LIMITS)
+    plt.title(f"KDE Plot: {pop1} vs {pop2}")
+    plt.savefig(os.path.join(OUTPUT_DIR, f"KDE_{pop1}_vs_{pop2}.svg"))
+    plt.show()
+
+    # Calculate mean per technical replicate
+    tech_rep_means = (
+        subset.groupby(['BiologicalReplicate', 'TechnicalReplicate', 'Population'])['BV421-A-Norm']
+        .mean()
+        .reset_index()
+    )
+
+    # Summary stats: mean and SD across all technical replicates per population
+    summary_stats = (
+        tech_rep_means.groupby('Population')['BV421-A-Norm']
+        .agg(['mean', 'std'])
+        .reindex([pop1, pop2])
+    )
+
+    # Paired t-test on technical replicate means, pairing by BiologicalReplicate and TechnicalReplicate
+    pivot = tech_rep_means.pivot_table(index=['BiologicalReplicate', 'TechnicalReplicate'], columns='Population', values='BV421-A-Norm')
+    if pop1 in pivot.columns and pop2 in pivot.columns:
+        # Drop rows with NaN in either column to keep pairs consistent
+        paired_data = pivot.dropna(subset=[pop1, pop2])
+        if not paired_data.empty:
+            t_stat, p_val = ttest_rel(paired_data[pop1], paired_data[pop2])
+        else:
+            t_stat, p_val = np.nan, np.nan
+    else:
+        t_stat, p_val = np.nan, np.nan
+
+    # Plot bar chart with SD error bars
+    plt.figure(figsize=(6, 4))
+    bars = plt.bar(
+        x=summary_stats.index,
+        height=summary_stats['mean'],
+        yerr=summary_stats['std'],
+        capsize=5,
+        color=[PALETTE[p] for p in summary_stats.index]
+    )
+
+    # Overlay individual points (technical replicate means)
+    for i, pop in enumerate(summary_stats.index):
+        y = tech_rep_means[tech_rep_means['Population'] == pop]['BV421-A-Norm'].values
+        x = np.random.normal(i, 0.08, size=len(y))  # jitter on x-axis for visibility
+        plt.scatter(x, y, color='black', edgecolor='white', zorder=10)
+
+    plt.ylabel("Mean ± SD")
+    plt.title(f"Mean BV421-A-Norm\n{pop1} vs {pop2} (p = {p_val:.2e})")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, f"Bar_{pop1}_vs_{pop2}.svg"))
+    plt.show()
+
+
+
+def main():
+    data = collect_data()
+    for pop1, pop2 in POPULATIONS_TO_COMPARE:
+        plot_aggregated_kde_and_bar(data, pop1, pop2)
+
+if __name__ == "__main__":
+    main()
+
 
