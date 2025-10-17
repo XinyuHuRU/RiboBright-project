@@ -1,3 +1,19 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Oct 10 14:23:52 2025
+
+@author: xinyuhu
+"""
+
+# ============================================================
+# 3D Manders Co-localization (full-stack thresholds, no Pearson)
+# - One threshold per stack from full 3D histogram (Otsu)
+# - Manders M1/M2 computed on full 3D volumes
+# - OR (union) domain for Manders (standard)
+# - Summary CSV + violin plots + stats
+# ============================================================
+
 import os
 import numpy as np
 import pandas as pd
@@ -5,10 +21,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 import tifffile
-from scipy.stats import mannwhitneyu, bootstrap, pearsonr, wilcoxon
+from scipy.stats import mannwhitneyu, bootstrap, wilcoxon
 from skimage.filters import threshold_otsu
 
-# --- Cropping parameters ---
+
+# Cropping parameters 
+
 CROP_X_START = 0
 CROP_Y_START = 0
 CROP_WIDTH = 2048
@@ -16,108 +34,71 @@ CROP_HEIGHT = 1024
 CROP_X_END = CROP_X_START + CROP_WIDTH
 CROP_Y_END = CROP_Y_START + CROP_HEIGHT
 
-# --- Toggle visual inspection ---
-VISUALIZE_RANDOM_SLICES = True
-
-# --- Load image ---
-def load_image_stack(path):
-    with tifffile.TiffFile(path) as tif:
-        data = tif.asarray()
-        if data.ndim == 4:
-            if data.shape[0] in [2, 3]:
-                return data
-            elif data.shape[1] in [2, 3]:
-                return data.transpose(1, 0, 2, 3)
-        raise ValueError(f"Unexpected data shape: {data.shape} in file: {path}")
-
-# --- Compute Manders Coefficients ---
-def compute_manders(ch1, ch2, plot=False, z=0, image_name=""):
-    ch1 = ch1.astype(float)
-    ch2 = ch2.astype(float)
-    try:
-        t1 = threshold_otsu(ch1)
-        t2 = threshold_otsu(ch2)
-    except ValueError:
-        return 0, 0
-    ch1_masked = np.where(ch1 > t1, ch1, 0)
-    ch2_masked = np.where(ch2 > t2, ch2, 0)
-    mask = (ch1_masked > 0) | (ch2_masked > 0)
-    ch1_vals = ch1_masked[mask]
-    ch2_vals = ch2_masked[mask]
-    if np.sum(ch1_vals) == 0 or np.sum(ch2_vals) == 0:
-        return 0, 0
-    M1 = np.sum(ch1_vals[ch2_vals > 0]) / np.sum(ch1_vals)
-    M2 = np.sum(ch2_vals[ch1_vals > 0]) / np.sum(ch2_vals)
-    if plot:
-        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-        axs[0].imshow(ch1_masked, cmap="Reds")
-        axs[0].set_title(f"RB (Otsu={t1:.1f})")
-        axs[1].imshow(ch2_masked, cmap="Greens")
-        axs[1].set_title(f"Target (Otsu={t2:.1f})")
-        plt.suptitle(f"{image_name} - Z={z}")
-        plt.tight_layout()
-        plt.show()
-    return M1, M2
-
-# --- Compute Pearson Correlation (Unthresholded) ---
-def compute_pearson(ch1, ch2):
-    ch1_flat = ch1.flatten().astype(float)
-    ch2_flat = ch2.flatten().astype(float)
-    mask = (ch1_flat > 0) | (ch2_flat > 0)
-    if np.count_nonzero(mask) < 2:
-        return np.nan
-    r, _ = pearsonr(ch1_flat[mask], ch2_flat[mask])
-    return r
-
-# --- Compute Pearson Correlation (Thresholded using Otsu) ---
-def compute_pearson_thresholded(ch1, ch2):
-    ch1 = ch1.astype(float)
-    ch2 = ch2.astype(float)
-    try:
-        t1 = threshold_otsu(ch1)
-        t2 = threshold_otsu(ch2)
-    except ValueError:
-        return np.nan
-    mask = (ch1 > t1) | (ch2 > t2)
-    if np.count_nonzero(mask) < 2:
-        return np.nan
-    r, _ = pearsonr(ch1[mask], ch2[mask])
-    return r
 
 output_dir = "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_017/plots"
 os.makedirs(output_dir, exist_ok=True)
 
-# --- Compute Pearson Correlation (Thresholded using Costes) ---
-def compute_pearson_costes(ch1, ch2, n_random=100, alpha=0.05):
-    ch1 = ch1.astype(float)
-    ch2 = ch2.astype(float)
-    ch1_flat = ch1.flatten()
-    ch2_flat = ch2.flatten()
+experiment_roots = {
+    "RB_XH_013": "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_013",
+    "RB_XH_017": "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_017"
+}
 
-    mask = (ch1_flat > 0) | (ch2_flat > 0)
-    if np.count_nonzero(mask) < 2:
-        return np.nan
-    r_actual, _ = pearsonr(ch1_flat[mask], ch2_flat[mask])  # kept if you want to inspect
 
-    rand_rs = []
-    for _ in range(n_random):
-        ch2_rand = np.random.permutation(ch2_flat)
-        rand_r, _ = pearsonr(ch1_flat[mask], ch2_rand[mask])
-        rand_rs.append(rand_r)
+# Image loading
 
-    threshold_r = np.percentile(rand_rs, 100 * (1 - alpha))
+def load_image_stack(path):
 
-    thresholds = np.linspace(np.min(ch1_flat), np.max(ch1_flat), num=100)
-    for t in thresholds:
-        m = (ch1_flat > t) & (ch2_flat > t)
-        if np.count_nonzero(m) < 2:
-            continue
-        r_test, _ = pearsonr(ch1_flat[m], ch2_flat[m])
-        if r_test > threshold_r:
-            return r_test
-    return np.nan
+    with tifffile.TiffFile(path) as tif:
+        data = tif.asarray()
+        if data.ndim == 4:
+            if data.shape[0] in [2, 3]:            # (C, Z, Y, X)
+                return data
+            elif data.shape[1] in [2, 3]:          # (Z, C, Y, X) -> (C, Z, Y, X)
+                return data.transpose(1, 0, 2, 3)
+        raise ValueError(f"Unexpected data shape: {data.shape} in file: {path}")
 
-# --- Analyze images ---
+
+# Thresholds & Manders (3D)
+
+def fullstack_threshold(vol3d):
+    """
+    Single Otsu threshold from the full 3D histogram (flattened volume).
+    """
+    flat = vol3d.astype(float).ravel()
+    if flat.size == 0:
+        raise ValueError("Empty volume")
+    return threshold_otsu(flat)
+
+def compute_manders_3d(ch1_vol, ch2_vol, t1=None, t2=None):
+    """
+    Manders M1/M2 on the full 3D volume.
+    Uses OR (union) domain, as standard for Manders co-occurrence.
+
+    M1 = sum(ch1 where ch2 > t2) / sum(ch1 in domain)
+    M2 = sum(ch2 where ch1 > t1) / sum(ch2 in domain)
+    domain = (ch1 > t1) | (ch2 > t2)
+    """
+    ch1 = ch1_vol.astype(float)
+    ch2 = ch2_vol.astype(float)
+
+    if t1 is None: t1 = fullstack_threshold(ch1)
+    if t2 is None: t2 = fullstack_threshold(ch2)
+
+    mask1 = ch1 > t1
+    mask2 = ch2 > t2
+    domain = mask1 | mask2  # OR domain for Manders
+
+    denom1 = ch1[domain].sum()
+    denom2 = ch2[domain].sum()
+    if denom1 == 0 or denom2 == 0:
+        return np.nan, np.nan, t1, t2
+
+    M1 = ch1[(mask2) & domain].sum() / denom1
+    M2 = ch2[(mask1) & domain].sum() / denom2
+    return M1, M2, t1, t2
+
+# Analysis loop (per image → 3D metrics)
+
 def analyze_folder(experiment_path, experiment_label):
     results = []
     for group in ['RB_ER', 'RB_Mito']:
@@ -128,8 +109,10 @@ def analyze_folder(experiment_path, experiment_label):
                     continue
                 filepath = os.path.join(subdir, file)
                 try:
-                    data = load_image_stack(filepath)
+                    data = load_image_stack(filepath)  # (C, Z, Y, X)
                     num_channels, num_z = data.shape[:2]
+
+                    # Channel assignment
                     if experiment_label == 'RB_XH_017':
                         if num_channels != 2:
                             raise ValueError(f"Expected 2 channels for RB_XH_017, got {num_channels}")
@@ -137,40 +120,42 @@ def analyze_folder(experiment_path, experiment_label):
                     else:
                         rb_ch = 0
                         target_ch = 1 if group == 'RB_ER' else 2
-                    m1s, m2s, pearsons, pearsons_thresh = [], [], [], []
-                    for z in range(num_z):
-                        rb = data[rb_ch, z]
-                        target = data[target_ch, z]
-                        rb_crop = rb[CROP_Y_START:CROP_Y_END, CROP_X_START:CROP_X_END]
-                        target_crop = target[CROP_Y_START:CROP_Y_END, CROP_X_START:CROP_X_END]
-                        show_plot = VISUALIZE_RANDOM_SLICES and z == 0 and np.random.rand() < 0.03
-                        m1, m2 = compute_manders(rb_crop, target_crop, plot=show_plot, z=z, image_name=file)
-                        r_unthresh = compute_pearson(rb_crop, target_crop)
-                        r_thresh = compute_pearson_thresholded(rb_crop, target_crop)
-                        r_costes = compute_pearson_costes(rb_crop, target_crop)
-                        m1s.append(m1)
-                        m2s.append(m2)
-                        pearsons.append(r_unthresh)
-                        pearsons_thresh.append(r_thresh)
+
+                    # Crop whole volume in YX (keep Z intact)
+                    rb_vol = data[rb_ch, :, CROP_Y_START:CROP_Y_END, CROP_X_START:CROP_X_END]
+                    tg_vol = data[target_ch, :, CROP_Y_START:CROP_Y_END, CROP_X_START:CROP_X_END]
+
+                    # 3D Manders with full-stack thresholds
+                    M1, M2, t1, t2 = compute_manders_3d(rb_vol, tg_vol)
+
+                    # Optional quick look at one random slice (visual only)
+                    if VISUALIZE_RANDOM_SLICES and num_z > 0:
+                        z = np.random.randint(0, num_z)
+                        fig, axs = plt.subplots(1, 2, figsize=(8, 4))
+                        axs[0].imshow(rb_vol[z], cmap="Reds")
+                        axs[0].set_title(f"RB (z={z}, Otsu={t1:.1f})")
+                        axs[1].imshow(tg_vol[z], cmap="Greens")
+                        axs[1].set_title(f"Target (z={z}, Otsu={t2:.1f})")
+                        plt.suptitle(file)
+                        plt.tight_layout()
+                        plt.show()
+
                     results.append({
                         "Experiment": experiment_label,
                         "Group": group,
                         "Image": file,
-                        "M1": np.mean(m1s),
-                        "M2": np.mean(m2s),
-                        "Pearson": np.nanmean(pearsons),
-                        "Pearson_Thresholded": np.nanmean(pearsons_thresh),
-                        "Pearson_Costes": r_costes
+                        "M1": M1,
+                        "M2": M2,
+                        "Otsu_t_RB": t1,
+                        "Otsu_t_Target": t2
                     })
 
                 except Exception as e:
                     print(f"Failed: {filepath}\nError: {e}")
     return results
 
-experiment_roots = {
-    "RB_XH_013": "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_013",
-    "RB_XH_017": "/Volumes/bifchem/Projects Hansen/Lab Members folders/XH/RiboBright/RB_XH_017"
-}
+
+# Run analysis
 
 all_results = []
 for label, path in experiment_roots.items():
@@ -179,34 +164,40 @@ for label, path in experiment_roots.items():
 
 df = pd.DataFrame(all_results)
 
-# === Save the requested summary CSV (before plotting) ===
-summary_cols = ["Experiment", "Group", "Image", "M1", "M2", "Pearson"]
+
+# Save CSVs
+
+summary_cols = ["Experiment", "Group", "Image", "M1", "M2"]
 df_summary = df[summary_cols].copy()
-summary_path = os.path.join(output_dir, "image_analysis_summary.csv")
+summary_path = os.path.join(output_dir, "image_analysis_summary_Manders3D.csv")
 df_summary.to_csv(summary_path, index=False)
 print(f"Saved summary to: {summary_path}")
 
-# Also keep your original, more detailed CSV if you want
-df.to_csv(os.path.join(output_dir, "manders_results.csv"), index=False)
+df.to_csv(os.path.join(output_dir, "manders3d_results_full.csv"), index=False)
 
-# --- Statistical Functions ---
+
+# Stats helpers
+
 def cohens_d(x, y):
     nx, ny = len(x), len(y)
     pooled_std = np.sqrt(((nx - 1) * np.var(x, ddof=1) + (ny - 1) * np.var(y, ddof=1)) / (nx + ny - 2))
     return (np.mean(x) - np.mean(y)) / pooled_std
 
 def median_ci(data, confidence=0.95, n_resamples=10000):
-    res = bootstrap((data,), np.median, confidence_level=confidence, n_resamples=n_resamples, method='basic')
+    res = bootstrap((np.asarray(data),), np.median, confidence_level=confidence, n_resamples=n_resamples, method='basic')
     return res.confidence_interval.low, res.confidence_interval.high
 
-# --- Plotting ---
+
+# Plotting: ER vs Mito for M1 and M2
+
 sns.set(style="white", font_scale=1.2)
 palette = {"RB_XH_013": "#1f77b4", "RB_XH_017": "#ff7f0e"}
 
-for metric in ["M1", "M2", "Pearson", "Pearson_Thresholded", "Pearson_Costes"]:
+for metric in ["M1", "M2"]:
     plt.figure(figsize=(10, 6))
     ax = sns.violinplot(x="Group", y=metric, data=df, inner="box", palette="pastel", cut=0)
-    sns.stripplot(x="Group", y=metric, data=df, hue="Experiment", palette=palette, dodge=True, jitter=True, size=6, edgecolor="gray", linewidth=0.7)
+    sns.stripplot(x="Group", y=metric, data=df, hue="Experiment", palette=palette, dodge=True,
+                  jitter=True, size=6, edgecolor="gray", linewidth=0.7)
 
     er_vals = df[df["Group"] == "RB_ER"][metric].dropna()
     mito_vals = df[df["Group"] == "RB_Mito"][metric].dropna()
@@ -239,26 +230,34 @@ for metric in ["M1", "M2", "Pearson", "Pearson_Thresholded", "Pearson_Costes"]:
             ha='center', fontsize=11)
 
     for i, (group, med, ci) in enumerate(zip(["RB_ER", "RB_Mito"], [median_er, median_mito], [ci_er, ci_mito])):
-        ax.text(i, med + 0.01, f"Median: {med:.2f}\nCI: [{ci[0]:.2f}, {ci[1]:.2f}]", ha='center', va='bottom', fontsize=10)
+        ax.text(i, med + 0.01, f"Median: {med:.2f}\nCI: [{ci[0]:.2f}, {ci[1]:.2f}]",
+                ha='center', va='bottom', fontsize=10)
 
-    plt.title(f"{metric} Co-localization (ER vs. Mito)")
+    plt.title(f"{metric} Co-localization (3D; ER vs. Mito)")
     plt.ylabel(f"{metric} coefficient")
     plt.xlabel("Group")
     plt.legend(title="Experiment", loc="upper right")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"{metric.lower()}_violin.svg"), dpi=300)
+    plt.savefig(os.path.join(output_dir, f"{metric.lower()}_violin_Manders3D.svg"), dpi=300)
     plt.show()
 
-# --- M1 vs M2 per group ---
+
+# Paired: M1 vs M2 within each group
+
 for group in ["RB_ER", "RB_Mito"]:
     plt.figure(figsize=(6, 6))
     subset = df[df["Group"] == group][["M1", "M2"]].dropna()
-    melted = pd.melt(subset.reset_index(drop=True), value_vars=["M1", "M2"], var_name="Metric", value_name="Manders")
+    melted = pd.melt(subset.reset_index(drop=True), value_vars=["M1", "M2"],
+                     var_name="Metric", value_name="Manders")
     ax = sns.violinplot(x="Metric", y="Manders", data=melted, inner="box", palette="pastel", cut=0)
     sns.stripplot(x="Metric", y="Manders", data=melted, jitter=True, size=6, color="gray", alpha=0.6)
 
-    # Paired stats
-    stat, pval = wilcoxon(subset["M1"], subset["M2"])
+    # Paired Wilcoxon (M1 vs M2 within group)
+    if len(subset) >= 2:
+        stat, pval = wilcoxon(subset["M1"], subset["M2"])
+    else:
+        pval = np.nan
+
     m1_med = np.median(subset["M1"]); m2_med = np.median(subset["M2"])
     m1_mean = np.mean(subset["M1"]);  m2_mean = np.mean(subset["M2"])
 
@@ -276,9 +275,9 @@ for group in ["RB_ER", "RB_Mito"]:
             f"med M2 = {m2_med:.3f}",
             ha='center', fontsize=10)
 
-    plt.title(f"{group}: M1 vs M2")
+    plt.title(f"{group}: M1 vs M2 (3D)")
     plt.ylabel("Manders Coefficient")
     plt.xlabel("")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"manders_{group}_M1_vs_M2_violin.svg"), dpi=300)
+    plt.savefig(os.path.join(output_dir, f"manders3d_{group}_M1_vs_M2_violin.svg"), dpi=300)
     plt.show()
