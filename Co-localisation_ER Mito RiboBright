@@ -6,13 +6,12 @@ Created on Fri Oct 10 14:23:52 2025
 @author: xinyuhu
 """
 
-# ============================================================
 # 3D Manders Co-localization (full-stack thresholds, no Pearson)
 # - One threshold per stack from full 3D histogram (Otsu)
 # - Manders M1/M2 computed on full 3D volumes
 # - OR (union) domain for Manders (standard)
 # - Summary CSV + violin plots + stats
-# ============================================================
+
 
 import os
 import numpy as np
